@@ -183,7 +183,7 @@ app.post('/api/cerrar-sesion', (req, res) => {
 });
 
 // ==========================================
-// 2. PERFIL DE USUARIO Y CRUD USUARIOS
+// 2. PERFIL DE USUARIO, REGISTRO Y CRUD USUARIOS
 // ==========================================
 
 app.put('/api/perfil', async (req, res) => {
@@ -281,38 +281,70 @@ app.get('/api/usuarios', async (req, res) => {
   return res.json(usuariosBase.map(({ password, ...rest }) => rest));
 });
 
+// REGISTRO DE CUIDADORES / DOCTORES / FAMILIARES
 app.post('/api/usuarios', async (req, res) => {
   try {
-    const { nombre, email, rol, telefono, password } = req.body || {};
-    const rolesValidos = ['administrador', 'paciente', 'cuidador'];
+    const {
+      nombre,
+      email,
+      rol,
+      telefono,
+      password,
+      acepto_privacidad,
+      fecha_aceptacion_legal
+    } = req.body || {};
 
-    if (!nombre || !email || !rol || !rolesValidos.includes(String(rol).toLowerCase())) {
-      return res.status(422).json({ mensaje: 'Datos inválidos o rol no permitido.' });
+    const rolesValidos = ['administrador', 'paciente', 'cuidador', 'doctor', 'familiar'];
+
+    if (!nombre || String(nombre).trim().length < 3) {
+      return res.status(422).json({ mensaje: 'El nombre completo es obligatorio (mínimo 3 caracteres).' });
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+      return res.status(422).json({ mensaje: 'Ingresa un correo electrónico válido.' });
+    }
+    if (!rol || !rolesValidos.includes(String(rol).toLowerCase())) {
+      return res.status(422).json({ mensaje: 'Selecciona un rol válido (cuidador, familiar o doctor).' });
+    }
+    if (!password || String(password).length < 8) {
+      return res.status(422).json({ mensaje: 'La contraseña debe tener al menos 8 caracteres.' });
     }
 
     const emailLower = String(email).trim().toLowerCase();
-    const passwordClave = password && password.length >= 6 ? password : 'password123';
-    const hash = await cifrarPasswordLaravel(passwordClave);
+    const db = getDB();
+
+    const yaExiste = await db.collection('usuarios').findOne({
+      $or: [{ email: emailLower }, { correo: emailLower }]
+    });
+    if (yaExiste) {
+      return res.status(422).json({ mensaje: 'Ya existe una cuenta registrada con ese correo electrónico.' });
+    }
+
+    const hash = await cifrarPasswordLaravel(password);
 
     const nuevo = {
       id: emailLower,
       _id: emailLower,
-      nombre: String(nombre),
-      name: String(nombre),
+      nombre: String(nombre).trim(),
+      name: String(nombre).trim(),
       email: emailLower,
+      correo: emailLower,
       password: hash,
       rol: String(rol).toLowerCase(),
-      telefono: telefono || 'Sin teléfono',
+      telefono: telefono ? String(telefono).trim() : '',
+      acepto_privacidad: Boolean(acepto_privacidad),
+      fecha_aceptacion_legal: fecha_aceptacion_legal || new Date().toISOString(),
       estado: 'activo',
       foto: `https://ui-avatars.com/api/?name=${encodeURIComponent(nombre)}&background=0D8ABC&color=fff`,
       created_at: new Date().toISOString()
     };
 
-    const db = getDB();
     await db.collection('usuarios').insertOne({ ...nuevo });
 
     const { password: _, ...usuarioSinPass } = nuevo;
-    return res.status(201).json({ mensaje: 'Usuario registrado exitosamente', usuario: usuarioSinPass });
+    return res.status(201).json({
+      mensaje: 'Usuario registrado exitosamente',
+      usuario: usuarioSinPass
+    });
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al registrar usuario', error: error.message });
   }
@@ -356,6 +388,54 @@ app.delete('/api/usuarios/:id', async (req, res) => {
     return res.json({ mensaje: 'Usuario eliminado exitosamente' });
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al eliminar usuario', error: error.message });
+  }
+});
+
+// ==========================================
+// 2.5 PERFILES DE PACIENTES (SIN CONTRASEÑA, VINCULADOS AL CUIDADOR)
+// ==========================================
+
+app.post('/api/pacientes', async (req, res) => {
+  try {
+    const cuidadorEmail = resolverEmail(req);
+    const { nombre, edad, telefono, padecimientos, notas } = req.body || {};
+
+    if (!nombre || String(nombre).trim().length < 2) {
+      return res.status(422).json({ mensaje: 'El nombre del paciente es obligatorio.' });
+    }
+
+    const nuevoPaciente = {
+      id: crypto.randomBytes(8).toString('hex'),
+      cuidador_email: cuidadorEmail,
+      nombre: String(nombre).trim(),
+      edad: edad ? Number(edad) : null,
+      telefono: telefono ? String(telefono).trim() : '',
+      padecimientos: padecimientos || '',
+      notas: notas || '',
+      foto: `https://ui-avatars.com/api/?name=${encodeURIComponent(nombre)}&background=0D8ABC&color=fff`,
+      created_at: new Date().toISOString()
+    };
+
+    const db = getDB();
+    await db.collection('pacientes').insertOne({ ...nuevoPaciente });
+
+    return res.status(201).json({
+      mensaje: 'Perfil de paciente creado exitosamente',
+      paciente: nuevoPaciente
+    });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al crear perfil de paciente', error: error.message });
+  }
+});
+
+app.get('/api/pacientes', async (req, res) => {
+  try {
+    const cuidadorEmail = resolverEmail(req);
+    const db = getDB();
+    const pacientes = await db.collection('pacientes').find({ cuidador_email: cuidadorEmail }).toArray();
+    return res.json(pacientes);
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al obtener pacientes', error: error.message });
   }
 });
 
