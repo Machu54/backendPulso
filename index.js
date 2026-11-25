@@ -14,8 +14,29 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // ==========================================
-// HELPERS GENERALES
+// HELPERS GENERALES Y CIFRADO COMPATIBLE LARAVEL
 // ==========================================
+
+async function cifrarPasswordLaravel(passwordPlana) {
+  const hash = await bcrypt.hash(String(passwordPlana), 10);
+  // Mantiene el prefijo $2y$ de Laravel para que tanto PHP como Node lo lean igual
+  return hash.replace(/^\$2[ab]\$/, '$2y$');
+}
+
+async function verificarPassword(passwordPlana, hashGuardado) {
+  if (!passwordPlana || !hashGuardado) return false;
+  const passStr = String(passwordPlana);
+  const hashStr = String(hashGuardado).trim();
+
+  // Si es un hash bcrypt ($2y$, $2a$, $2b$)
+  if (/^\$2[aby]\$/.test(hashStr)) {
+    const hashCompatible = hashStr.replace(/^\$2y\$/, '$2a$');
+    return await bcrypt.compare(passStr, hashCompatible);
+  }
+
+  // Fallback por si algún usuario de prueba en MongoDB se guardó en texto plano
+  return passStr === hashStr;
+}
 
 function resolverEmail(req, defaultEmail = 'admin@pulso.com') {
   if (req.headers['x-user-email']) {
@@ -85,23 +106,32 @@ function ahoraDateTime() {
 
 app.post('/api/iniciar-sesion', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
+    const { email, correo, password, contrasena } = req.body || {};
+    const emailInput = email || correo;
+    const passwordInput = password || contrasena;
+
+    if (!emailInput || !passwordInput) {
       return res.status(422).json({
         message: 'La contraseña o correo ingresado es incorrecto.',
         errors: { email: ['La contraseña o correo ingresado es incorrecto.'] }
       });
     }
 
-    const emailLimpio = String(email).trim().toLowerCase();
+    const emailLimpio = String(emailInput).trim().toLowerCase();
     const db = getDB();
-    const usuario = await db.collection('usuarios').findOne({ email: emailLimpio });
+    const usuario = await db.collection('usuarios').findOne({
+      $or: [
+        { email: emailLimpio },
+        { correo: emailLimpio },
+        { id: emailLimpio },
+        { _id: emailLimpio }
+      ]
+    });
 
-    // Compatibilidad con hashes $2y$ generados previamente en Laravel
-    const hashGuardado = usuario?.password ? usuario.password.replace(/^\$2y\$/, '$2a$') : '';
-    const passwordValido = usuario && hashGuardado ? await bcrypt.compare(password, hashGuardado) : false;
+    const hashGuardado = usuario ? (usuario.password || usuario.contrasena || '') : '';
+    const passwordValido = await verificarPassword(passwordInput, hashGuardado);
 
-    if (!passwordValido) {
+    if (!usuario || !passwordValido) {
       return res.status(422).json({
         message: 'La contraseña o correo ingresado es incorrecto.',
         errors: { email: ['La contraseña o correo ingresado es incorrecto.'] }
@@ -138,7 +168,10 @@ app.get('/api/usuario', async (req, res) => {
     const email = resolverEmail(req, '');
     if (!email) return res.json(null);
     const db = getDB();
-    const usuario = await db.collection('usuarios').findOne({ email }, { projection: { password: 0 } });
+    const usuario = await db.collection('usuarios').findOne(
+      { $or: [{ email }, { correo: email }] },
+      { projection: { password: 0, contrasena: 0 } }
+    );
     return res.json(usuario || null);
   } catch (_) {
     return res.json(null);
@@ -156,7 +189,7 @@ app.post('/api/cerrar-sesion', (req, res) => {
 app.put('/api/perfil', async (req, res) => {
   try {
     const email = resolverEmail(req);
-    const { nombre, telefono, password } = req.body;
+    const { nombre, telefono, password } = req.body || {};
 
     const datosPerfil = {
       nombre,
@@ -165,12 +198,15 @@ app.put('/api/perfil', async (req, res) => {
     };
 
     if (password) {
-      datosPerfil.password = await bcrypt.hash(password, 10);
+      datosPerfil.password = await cifrarPasswordLaravel(password);
     }
 
     const db = getDB();
-    await db.collection('usuarios').updateOne({ email }, { $set: datosPerfil });
-    const userActualizado = await db.collection('usuarios').findOne({ email });
+    await db.collection('usuarios').updateOne(
+      { $or: [{ email }, { correo: email }] },
+      { $set: datosPerfil }
+    );
+    const userActualizado = await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] });
 
     const { password: _, ...sinPass } = datosPerfil;
 
@@ -195,12 +231,13 @@ app.get('/api/usuarios', async (req, res) => {
   const db = getDB();
 
   try {
-    const listaMongo = await db.collection('usuarios').find({}, { projection: { password: 0 } }).toArray();
+    const listaMongo = await db.collection('usuarios').find({}, { projection: { password: 0, contrasena: 0 } }).toArray();
     if (listaMongo.length > 0) {
       return res.json(listaMongo);
     }
   } catch (_) {}
 
+  const passwordDefault = await cifrarPasswordLaravel('admin123456');
   const usuariosBase = [
     {
       id: 'jdaniel.vb08@gmail.com',
@@ -208,6 +245,7 @@ app.get('/api/usuarios', async (req, res) => {
       nombre: 'Danielo',
       name: 'Danielo',
       email: 'jdaniel.vb08@gmail.com',
+      password: passwordDefault,
       rol: 'paciente',
       telefono: '3322014606',
       estado: 'activo'
@@ -218,6 +256,7 @@ app.get('/api/usuarios', async (req, res) => {
       nombre: 'Juanito Admin',
       name: 'Juanito Admin',
       email: 'admin@pulso.com',
+      password: passwordDefault,
       rol: 'administrador',
       telefono: '3312345678',
       estado: 'activo'
@@ -228,6 +267,7 @@ app.get('/api/usuarios', async (req, res) => {
       nombre: 'Alejandro Mixteco',
       name: 'Alejandro Mixteco',
       email: 'alejandromixer17@gmail.com',
+      password: passwordDefault,
       rol: 'paciente',
       telefono: '3349815977',
       estado: 'activo'
@@ -238,12 +278,12 @@ app.get('/api/usuarios', async (req, res) => {
     await db.collection('usuarios').insertMany(usuariosBase.map((u) => ({ ...u })));
   } catch (_) {}
 
-  return res.json(usuariosBase);
+  return res.json(usuariosBase.map(({ password, ...rest }) => rest));
 });
 
 app.post('/api/usuarios', async (req, res) => {
   try {
-    const { nombre, email, rol, telefono, password } = req.body;
+    const { nombre, email, rol, telefono, password } = req.body || {};
     const rolesValidos = ['administrador', 'paciente', 'cuidador'];
 
     if (!nombre || !email || !rol || !rolesValidos.includes(String(rol).toLowerCase())) {
@@ -252,7 +292,7 @@ app.post('/api/usuarios', async (req, res) => {
 
     const emailLower = String(email).trim().toLowerCase();
     const passwordClave = password && password.length >= 6 ? password : 'password123';
-    const hash = await bcrypt.hash(passwordClave, 10);
+    const hash = await cifrarPasswordLaravel(passwordClave);
 
     const nuevo = {
       id: emailLower,
@@ -271,7 +311,8 @@ app.post('/api/usuarios', async (req, res) => {
     const db = getDB();
     await db.collection('usuarios').insertOne({ ...nuevo });
 
-    return res.status(201).json({ mensaje: 'Usuario registrado exitosamente', usuario: nuevo });
+    const { password: _, ...usuarioSinPass } = nuevo;
+    return res.status(201).json({ mensaje: 'Usuario registrado exitosamente', usuario: usuarioSinPass });
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al registrar usuario', error: error.message });
   }
@@ -280,7 +321,7 @@ app.post('/api/usuarios', async (req, res) => {
 app.put('/api/usuarios/:id', async (req, res) => {
   try {
     const idLower = String(req.params.id).trim().toLowerCase();
-    const { nombre, rol, telefono, estado, password } = req.body;
+    const { nombre, rol, telefono, estado, password } = req.body || {};
 
     const datosActualizar = {};
     if (nombre !== undefined) {
@@ -290,11 +331,11 @@ app.put('/api/usuarios/:id', async (req, res) => {
     if (rol !== undefined) datosActualizar.rol = String(rol).toLowerCase();
     if (telefono !== undefined) datosActualizar.telefono = telefono;
     if (estado !== undefined) datosActualizar.estado = estado;
-    if (password) datosActualizar.password = await bcrypt.hash(password, 10);
+    if (password) datosActualizar.password = await cifrarPasswordLaravel(password);
 
     const db = getDB();
     await db.collection('usuarios').updateMany(
-      { $or: [{ email: idLower }, { _id: idLower }] },
+      { $or: [{ email: idLower }, { correo: idLower }, { _id: idLower }] },
       { $set: datosActualizar }
     );
 
@@ -309,7 +350,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
     const idLower = String(req.params.id).trim().toLowerCase();
     const db = getDB();
     await db.collection('usuarios').deleteMany({
-      $or: [{ email: idLower }, { _id: idLower }]
+      $or: [{ email: idLower }, { correo: idLower }, { _id: idLower }]
     });
 
     return res.json({ mensaje: 'Usuario eliminado exitosamente' });
@@ -328,7 +369,7 @@ app.get('/api/respaldo/exportar', async (req, res) => {
 
   let userDb = {};
   try {
-    userDb = (await db.collection('usuarios').findOne({ email })) || {};
+    userDb = (await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] })) || {};
   } catch (_) {}
 
   const nombre = userDb.nombre || userDb.name || 'Usuario Pulso';
@@ -382,7 +423,7 @@ app.post('/api/respaldo/importar', async (req, res) => {
     if (datos.datos?.contactos !== undefined) updates.contactos_emergencia = datos.datos.contactos;
 
     if (Object.keys(updates).length > 0) {
-      await db.collection('usuarios').updateOne({ email }, { $set: updates });
+      await db.collection('usuarios').updateOne({ $or: [{ email }, { correo: email }] }, { $set: updates });
     }
 
     return res.json({ mensaje: 'Respaldo importado y restaurado exitosamente' });
@@ -401,7 +442,7 @@ app.get('/api/historial-medico', async (req, res) => {
 
   try {
     const db = getDB();
-    let userDb = await db.collection('usuarios').findOne({ email });
+    let userDb = await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] });
     if (!userDb || !userDb.historial_medico) {
       userDb = await db.collection('usuarios').findOne({});
     }
@@ -431,7 +472,7 @@ app.get('/api/historial-medico', async (req, res) => {
 });
 
 app.post('/api/historial-medico', async (req, res) => {
-  const { titulo, diagnostico, notas } = req.body;
+  const { titulo, diagnostico, notas } = req.body || {};
   if (!titulo || !diagnostico) {
     return res.status(422).json({ mensaje: 'titulo y diagnostico son obligatorios.' });
   }
@@ -447,7 +488,7 @@ app.post('/api/historial-medico', async (req, res) => {
 
   try {
     const db = getDB();
-    const userDb = await db.collection('usuarios').findOne({ email });
+    const userDb = await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] });
 
     if (!userDb) {
       await db.collection('usuarios').insertOne({
@@ -463,7 +504,7 @@ app.post('/api/historial-medico', async (req, res) => {
       historialActual.push(nuevoRegistro);
 
       await db.collection('usuarios').updateOne(
-        { email },
+        { $or: [{ email }, { correo: email }] },
         { $set: { historial_medico: historialActual } }
       );
     }
@@ -483,7 +524,6 @@ app.get('/api/mediciones', async (req, res) => {
   try {
     const db = getDB();
 
-    // Purgar registros de prueba
     try {
       await db.collection('mediciones').deleteMany({
         $or: [
@@ -510,7 +550,7 @@ app.get('/api/mediciones', async (req, res) => {
 
 app.post('/api/mediciones', async (req, res) => {
   try {
-    const { tipo_medicion, valor, unidad, notas, fecha_hora } = req.body;
+    const { tipo_medicion, valor, unidad, notas, fecha_hora } = req.body || {};
     if (!tipo_medicion || !valor || !unidad) {
       return res.status(422).json({ status: 'error', message: 'tipo_medicion, valor y unidad son obligatorios.' });
     }
@@ -586,7 +626,7 @@ app.get('/api/eventos', async (req, res) => {
 
 app.post('/api/eventos', async (req, res) => {
   try {
-    const { titulo, descripcion, tipo } = req.body;
+    const { titulo, descripcion, tipo } = req.body || {};
     if (!titulo || !descripcion || !tipo) {
       return res.status(422).json({ mensaje: 'titulo, descripcion y tipo son obligatorios.' });
     }
@@ -677,7 +717,7 @@ app.get('/api/contactos', async (req, res) => {
 
   try {
     const db = getDB();
-    let userDb = await db.collection('usuarios').findOne({ email });
+    let userDb = await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] });
     if (!userDb || !userDb.contactos_emergencia) {
       userDb = await db.collection('usuarios').findOne({});
     }
@@ -701,7 +741,7 @@ app.get('/api/contactos', async (req, res) => {
 });
 
 app.post('/api/contactos', async (req, res) => {
-  const { nombre, relacion, telefono } = req.body;
+  const { nombre, relacion, telefono } = req.body || {};
   if (!nombre || !relacion || !telefono) {
     return res.status(422).json({ mensaje: 'nombre, relacion y telefono son obligatorios.' });
   }
@@ -716,7 +756,7 @@ app.post('/api/contactos', async (req, res) => {
 
   try {
     const db = getDB();
-    const userDb = await db.collection('usuarios').findOne({ email });
+    const userDb = await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] });
 
     if (!userDb) {
       await db.collection('usuarios').insertOne({
@@ -728,7 +768,7 @@ app.post('/api/contactos', async (req, res) => {
       const contactosActuales = Array.isArray(userDb.contactos_emergencia) ? userDb.contactos_emergencia : [];
       contactosActuales.push(nuevoContacto);
       await db.collection('usuarios').updateOne(
-        { email },
+        { $or: [{ email }, { correo: email }] },
         { $set: { contactos_emergencia: contactosActuales } }
       );
     }
@@ -741,7 +781,7 @@ app.post('/api/contactos', async (req, res) => {
 });
 
 app.put('/api/contactos/:id', async (req, res) => {
-  const { nombre, relacion, telefono } = req.body;
+  const { nombre, relacion, telefono } = req.body || {};
   if (!nombre || !relacion || !telefono) {
     return res.status(422).json({ mensaje: 'nombre, relacion y telefono son obligatorios.' });
   }
@@ -751,7 +791,7 @@ app.put('/api/contactos/:id', async (req, res) => {
 
   try {
     const db = getDB();
-    const userDb = await db.collection('usuarios').findOne({ email });
+    const userDb = await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] });
     if (userDb && Array.isArray(userDb.contactos_emergencia)) {
       const actualizados = userDb.contactos_emergencia.map((c) => {
         if (String(c.id || '') === id || String(c._id || '') === id) {
@@ -760,7 +800,7 @@ app.put('/api/contactos/:id', async (req, res) => {
         return c;
       });
       await db.collection('usuarios').updateOne(
-        { email },
+        { $or: [{ email }, { correo: email }] },
         { $set: { contactos_emergencia: actualizados } }
       );
     }
@@ -775,13 +815,13 @@ app.delete('/api/contactos/:id', async (req, res) => {
 
   try {
     const db = getDB();
-    const userDb = await db.collection('usuarios').findOne({ email });
+    const userDb = await db.collection('usuarios').findOne({ $or: [{ email }, { correo: email }] });
     if (userDb && Array.isArray(userDb.contactos_emergencia)) {
       const filtrados = userDb.contactos_emergencia.filter(
         (c) => String(c.id || '') !== id && String(c._id || '') !== id
       );
       await db.collection('usuarios').updateOne(
-        { email },
+        { $or: [{ email }, { correo: email }] },
         { $set: { contactos_emergencia: filtrados } }
       );
     }
@@ -814,7 +854,7 @@ app.get('/api/medicamentos', async (req, res) => {
 
 app.post('/api/medicamentos', async (req, res) => {
   try {
-    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas } = req.body;
+    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas } = req.body || {};
     if (!nombre || !dosis || !Array.isArray(horas)) {
       return res.status(422).json({ status: 'error', message: 'nombre, dosis y horas (array) son obligatorios.' });
     }
@@ -858,7 +898,7 @@ app.put('/api/medicamentos/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const email = req.headers['x-user-email'] || req.body.user_email;
-    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas } = req.body;
+    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas } = req.body || {};
 
     const updates = { updated_at: ahoraDateTime() };
     if (nombre !== undefined) updates.nombre = String(nombre);
@@ -929,7 +969,7 @@ app.get('/api/chat/contactos', async (req, res) => {
   try {
     const emailActual = resolverEmail(req);
     const db = getDB();
-    const usuarios = await db.collection('usuarios').find({}, { projection: { password: 0 } }).toArray();
+    const usuarios = await db.collection('usuarios').find({}, { projection: { password: 0, contrasena: 0 } }).toArray();
 
     const contactosValidos = usuarios.filter((u) => {
       const e = String(u.email || u.correo || '').trim().toLowerCase();
@@ -967,7 +1007,7 @@ app.get('/api/chat/conversacion/:receptorEmail', async (req, res) => {
 
 app.post('/api/chat/enviar', async (req, res) => {
   try {
-    const { receptor_email, mensaje } = req.body;
+    const { receptor_email, mensaje } = req.body || {};
     if (!receptor_email || !mensaje) {
       return res.status(422).json({ mensaje: 'receptor_email y mensaje son obligatorios.' });
     }
@@ -976,14 +1016,14 @@ app.post('/api/chat/enviar', async (req, res) => {
     const receptorLower = String(receptor_email).trim().toLowerCase();
     const db = getDB();
 
-    const receptorDb = await db.collection('usuarios').findOne({ email: receptorLower });
+    const receptorDb = await db.collection('usuarios').findOne({ $or: [{ email: receptorLower }, { correo: receptorLower }] });
     if (!receptorDb) {
       return res.status(422).json({
         mensaje: 'El usuario destinatario ya no cuenta con cuenta activa en el sistema.'
       });
     }
 
-    const remitenteDb = await db.collection('usuarios').findOne({ email: emailActual });
+    const remitenteDb = await db.collection('usuarios').findOne({ $or: [{ email: emailActual }, { correo: emailActual }] });
     const nombreActual = remitenteDb?.nombre || remitenteDb?.name || req.body.remitente || 'Usuario';
 
     const nuevoMensaje = {
