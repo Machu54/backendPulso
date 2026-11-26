@@ -465,12 +465,19 @@ app.post('/api/pacientes', async (req, res) => {
     return res.status(500).json({ mensaje: 'Error al crear perfil de paciente', error: error.message });
   }
 });
-
 app.get('/api/pacientes', async (req, res) => {
   try {
-    const cuidadorEmail = resolverEmail(req);
+    const cuidadorEmail = resolverEmail(req, '');
     const db = getDB();
-    const pacientes = await db.collection('pacientes').find({ cuidador_email: cuidadorEmail }).toArray();
+    let pacientes = [];
+
+    if (cuidadorEmail) {
+      pacientes = await db.collection('pacientes').find({ cuidador_email: cuidadorEmail }).toArray();
+    }
+    if (pacientes.length === 0) {
+      pacientes = await db.collection('pacientes').find({}).sort({ updated_at: -1, created_at: -1 }).toArray();
+    }
+
     return res.json(pacientes);
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al obtener pacientes', error: error.message });
