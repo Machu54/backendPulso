@@ -934,7 +934,7 @@ app.get('/api/medicamentos', async (req, res) => {
 
 app.post('/api/medicamentos', async (req, res) => {
   try {
-    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas } = req.body || {};
+    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas, fecha_inicio, fecha_fin } = req.body || {};
     if (!nombre || !dosis || !Array.isArray(horas)) {
       return res.status(422).json({ status: 'error', message: 'nombre, dosis y horas (array) son obligatorios.' });
     }
@@ -953,6 +953,8 @@ app.post('/api/medicamentos', async (req, res) => {
         ? dias
         : ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'],
       horas: formatearHoras(horas),
+      fecha_inicio: fecha_inicio || null,
+      fecha_fin: fecha_fin || null,
       created_at: now,
       updated_at: now
     };
@@ -978,7 +980,7 @@ app.put('/api/medicamentos/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const email = req.headers['x-user-email'] || req.body.user_email;
-    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas } = req.body || {};
+    const { nombre, dosis, unidad, instrucciones, frecuencia, dias, horas, fecha_inicio, fecha_fin } = req.body || {};
 
     const updates = { updated_at: ahoraDateTime() };
     if (nombre !== undefined) updates.nombre = String(nombre);
@@ -988,6 +990,8 @@ app.put('/api/medicamentos/:id', async (req, res) => {
     if (frecuencia !== undefined) updates.frecuencia = frecuencia;
     if (Array.isArray(dias)) updates.dias = dias;
     if (Array.isArray(horas)) updates.horas = formatearHoras(horas);
+    if (fecha_inicio !== undefined) updates.fecha_inicio = fecha_inicio;
+    if (fecha_fin !== undefined) updates.fecha_fin = fecha_fin;
 
     const filtro = filtroIdMongo(id);
     if (email) filtro.user_email = String(email).trim().toLowerCase();
