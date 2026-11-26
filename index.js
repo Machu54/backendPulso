@@ -100,6 +100,30 @@ function ahoraDateTime() {
   return new Date().toISOString().replace('T', ' ').substring(0, 19);
 }
 
+function validarDatosPaciente(body) {
+  const requeridos = [
+    { key: 'nombre', label: 'Nombre completo' },
+    { key: 'sexo', label: 'Sexo' },
+    { key: 'edad', label: 'Edad' },
+    { key: 'domicilio', label: 'Domicilio completo' },
+    { key: 'tipo_sangre', label: 'Tipo de sangre' },
+    { key: 'alergias', label: 'Alergias conocidas' },
+    { key: 'padecimientos', label: 'Padecimientos crónicos' },
+    { key: 'contacto_emergencia_nombre', label: 'Nombre del contacto de emergencia' },
+    { key: 'contacto_emergencia_parentesco', label: 'Parentesco del contacto' },
+    { key: 'contacto_emergencia_telefono', label: 'Teléfono de emergencia' }
+  ];
+
+  const faltantes = requeridos.filter(
+    (c) => body[c.key] === undefined || body[c.key] === null || String(body[c.key]).trim() === ''
+  );
+
+  if (faltantes.length > 0) {
+    return `Faltan campos obligatorios del paciente: ${faltantes.map((f) => f.label).join(', ')}.`;
+  }
+  return null;
+}
+
 // ==========================================
 // 1. AUTENTICACIÓN
 // ==========================================
@@ -392,28 +416,42 @@ app.delete('/api/usuarios/:id', async (req, res) => {
 });
 
 // ==========================================
-// 2.5 PERFILES DE PACIENTES (SIN CONTRASEÑA, VINCULADOS AL CUIDADOR)
+// 2.5 PERFILES DE PACIENTES (CREAR, LISTAR, EDITAR)
 // ==========================================
 
 app.post('/api/pacientes', async (req, res) => {
   try {
     const cuidadorEmail = resolverEmail(req);
-    const { nombre, edad, telefono, padecimientos, notas } = req.body || {};
+    const body = req.body || {};
 
-    if (!nombre || String(nombre).trim().length < 2) {
-      return res.status(422).json({ mensaje: 'El nombre del paciente es obligatorio.' });
+    const errorValidacion = validarDatosPaciente(body);
+    if (errorValidacion) {
+      return res.status(422).json({ mensaje: errorValidacion });
     }
 
     const nuevoPaciente = {
       id: crypto.randomBytes(8).toString('hex'),
       cuidador_email: cuidadorEmail,
-      nombre: String(nombre).trim(),
-      edad: edad ? Number(edad) : null,
-      telefono: telefono ? String(telefono).trim() : '',
-      padecimientos: padecimientos || '',
-      notas: notas || '',
-      foto: `https://ui-avatars.com/api/?name=${encodeURIComponent(nombre)}&background=0D8ABC&color=fff`,
-      created_at: new Date().toISOString()
+      nombre: String(body.nombre).trim(),
+      edad: Number(body.edad),
+      fecha_nacimiento: body.fecha_nacimiento || '',
+      sexo: String(body.sexo).trim(),
+      telefono: body.telefono ? String(body.telefono).trim() : '',
+      domicilio: String(body.domicilio).trim(),
+      tipo_sangre: String(body.tipo_sangre).trim(),
+      peso: body.peso ? String(body.peso).trim() : '',
+      estatura: body.estatura ? String(body.estatura).trim() : '',
+      alergias: String(body.alergias).trim(),
+      padecimientos: String(body.padecimientos).trim(),
+      medico_cabecera: body.medico_cabecera ? String(body.medico_cabecera).trim() : '',
+      seguro_medico: body.seguro_medico ? String(body.seguro_medico).trim() : '',
+      contacto_emergencia_nombre: String(body.contacto_emergencia_nombre).trim(),
+      contacto_emergencia_parentesco: String(body.contacto_emergencia_parentesco).trim(),
+      contacto_emergencia_telefono: String(body.contacto_emergencia_telefono).trim(),
+      notas: body.notas ? String(body.notas).trim() : '',
+      foto: `https://ui-avatars.com/api/?name=${encodeURIComponent(body.nombre)}&background=0D8ABC&color=fff`,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     };
 
     const db = getDB();
@@ -436,6 +474,57 @@ app.get('/api/pacientes', async (req, res) => {
     return res.json(pacientes);
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al obtener pacientes', error: error.message });
+  }
+});
+
+app.put('/api/pacientes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const cuidadorEmail = resolverEmail(req);
+    const body = req.body || {};
+
+    const errorValidacion = validarDatosPaciente(body);
+    if (errorValidacion) {
+      return res.status(422).json({ mensaje: errorValidacion });
+    }
+
+    const updates = {
+      nombre: String(body.nombre).trim(),
+      edad: Number(body.edad),
+      fecha_nacimiento: body.fecha_nacimiento || '',
+      sexo: String(body.sexo).trim(),
+      telefono: body.telefono ? String(body.telefono).trim() : '',
+      domicilio: String(body.domicilio).trim(),
+      tipo_sangre: String(body.tipo_sangre).trim(),
+      peso: body.peso ? String(body.peso).trim() : '',
+      estatura: body.estatura ? String(body.estatura).trim() : '',
+      alergias: String(body.alergias).trim(),
+      padecimientos: String(body.padecimientos).trim(),
+      medico_cabecera: body.medico_cabecera ? String(body.medico_cabecera).trim() : '',
+      seguro_medico: body.seguro_medico ? String(body.seguro_medico).trim() : '',
+      contacto_emergencia_nombre: String(body.contacto_emergencia_nombre).trim(),
+      contacto_emergencia_parentesco: String(body.contacto_emergencia_parentesco).trim(),
+      contacto_emergencia_telefono: String(body.contacto_emergencia_telefono).trim(),
+      notas: body.notas ? String(body.notas).trim() : '',
+      foto: `https://ui-avatars.com/api/?name=${encodeURIComponent(body.nombre)}&background=0D8ABC&color=fff`,
+      updated_at: new Date().toISOString()
+    };
+
+    const db = getDB();
+    const filtro = {
+      ...filtroIdMongo(id),
+      cuidador_email: cuidadorEmail
+    };
+
+    await db.collection('pacientes').updateOne(filtro, { $set: updates });
+    const pacienteActualizado = await db.collection('pacientes').findOne(filtro);
+
+    return res.json({
+      mensaje: 'Perfil del paciente actualizado correctamente',
+      paciente: pacienteActualizado
+    });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al actualizar paciente', error: error.message });
   }
 });
 
