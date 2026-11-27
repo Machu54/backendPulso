@@ -19,7 +19,6 @@ app.use(express.urlencoded({ extended: true }));
 
 async function cifrarPasswordLaravel(passwordPlana) {
   const hash = await bcrypt.hash(String(passwordPlana), 10);
-  // Mantiene el prefijo $2y$ de Laravel para que tanto PHP como Node lo lean igual
   return hash.replace(/^\$2[ab]\$/, '$2y$');
 }
 
@@ -28,13 +27,11 @@ async function verificarPassword(passwordPlana, hashGuardado) {
   const passStr = String(passwordPlana);
   const hashStr = String(hashGuardado).trim();
 
-  // Si es un hash bcrypt ($2y$, $2a$, $2b$)
   if (/^\$2[aby]\$/.test(hashStr)) {
     const hashCompatible = hashStr.replace(/^\$2y\$/, '$2a$');
     return await bcrypt.compare(passStr, hashCompatible);
   }
 
-  // Fallback por si algún usuario de prueba en MongoDB se guardó en texto plano
   return passStr === hashStr;
 }
 
@@ -305,7 +302,6 @@ app.get('/api/usuarios', async (req, res) => {
   return res.json(usuariosBase.map(({ password, ...rest }) => rest));
 });
 
-// REGISTRO DE CUIDADORES / DOCTORES / FAMILIARES
 app.post('/api/usuarios', async (req, res) => {
   try {
     const {
@@ -465,6 +461,7 @@ app.post('/api/pacientes', async (req, res) => {
     return res.status(500).json({ mensaje: 'Error al crear perfil de paciente', error: error.message });
   }
 });
+
 app.get('/api/pacientes', async (req, res) => {
   try {
     const cuidadorEmail = resolverEmail(req, '');
@@ -836,6 +833,7 @@ async function sincronizarRecordatoriosCitas(db, emailFiltro = null) {
           await db.collection('notificaciones').insertOne({
             id: crypto.randomBytes(8).toString('hex'),
             recordatorio_key: keyUnica,
+            modulo: 'citas',
             user_email: ev.usuario_id || emailFiltro || '',
             titulo: tituloNotif,
             mensaje: mensajeNotif,
@@ -843,6 +841,7 @@ async function sincronizarRecordatoriosCitas(db, emailFiltro = null) {
             maps_url: ev.maps_url || '',
             tipo: tipoAviso === 'mismo_dia' ? 'alerta' : 'recordatorio',
             leida: false,
+            eliminada: false,
             fecha: new Date().toISOString()
           });
         }
@@ -959,7 +958,7 @@ async function sincronizarTodasLasNotificaciones(db) {
     const diaHoy = diasSemana[ahora.getDay()];
     const minutosAhora = ahora.getHours() * 60 + ahora.getMinutes();
 
-    // A. MEDICAMENTOS: UNA SOLA VEZ A SU HORA EXACTA (ventana de 5 min para Render)
+    // A. MEDICAMENTOS: UNA SOLA VEZ A SU HORA EXACTA (ventana de 5 min)
     const medicamentos = await db.collection('medicamentos').find({}).toArray();
     for (const med of medicamentos) {
       const diasNorm = (med.dias || []).map((d) => String(d).toLowerCase());
@@ -1065,6 +1064,119 @@ async function sincronizarTodasLasNotificaciones(db) {
     console.error('Error sincronizando notificaciones:', err.message);
   }
 }
+
+app.get('/api/notificaciones', async (req, res) => {
+  try {
+    const db = getDB();
+    await sincronizarTodasLasNotificaciones(db);
+
+    const docs = await db
+      .collection('notificaciones')
+      .find({ eliminada: { $ne: true } })
+      .sort({ fecha: -1, _id: -1 })
+      .limit(50)
+      .toArray();
+
+    const vistas = new Set();
+    const notificaciones = [];
+
+    for (const item of docs) {
+      const clave = item.recordatorio_key || `${item.titulo}_${item.mensaje}`;
+      if (!vistas.has(clave)) {
+        vistas.add(clave);
+        const id = String(item.id || item._id || '');
+        notificaciones.push({ ...item, id, _id: id });
+      }
+    }
+
+    return res.json(notificaciones);
+  } catch (_) {
+    return res.json([]);
+  }
+});
+
+app.post('/api/notificaciones', async (req, res) => {
+  try {
+    const { titulo, mensaje, tipo, modulo, recordatorio_key, ubicacion } = req.body || {};
+    if (!titulo) {
+      return res.status(422).json({ mensaje: 'El título es obligatorio.' });
+    }
+
+    const db = getDB();
+    if (recordatorio_key) {
+      const existente = await db.collection('notificaciones').findOne({ recordatorio_key });
+      if (existente) {
+        const idExistente = String(existente.id || existente._id || '');
+        return res.json({ ...existente, id: idExistente, _id: idExistente });
+      }
+    }
+
+    const nueva = {
+      id: crypto.randomBytes(8).toString('hex'),
+      recordatorio_key: recordatorio_key || '',
+      modulo: modulo || 'general',
+      titulo: String(titulo),
+      mensaje: mensaje ? String(mensaje) : '',
+      ubicacion: ubicacion ? String(ubicacion) : '',
+      tipo: tipo || 'recordatorio',
+      leida: false,
+      eliminada: false,
+      fecha: new Date().toISOString()
+    };
+
+    await db.collection('notificaciones').insertOne({ ...nueva });
+    return res.status(201).json(nueva);
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al guardar notificación', error: error.message });
+  }
+});
+
+app.put('/api/notificaciones/leer-todas', async (req, res) => {
+  try {
+    const db = getDB();
+    await db.collection('notificaciones').updateMany(
+      { eliminada: { $ne: true } },
+      { $set: { leida: true } }
+    );
+    return res.json({ mensaje: 'Notificaciones marcadas como leídas.' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al actualizar notificaciones', error: error.message });
+  }
+});
+
+app.put('/api/notificaciones/:id/leer', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getDB();
+    await db.collection('notificaciones').updateMany(filtroIdMongo(id), { $set: { leida: true } });
+    return res.json({ mensaje: 'Notificación marcada como leída.' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al marcar notificación', error: error.message });
+  }
+});
+
+app.delete('/api/notificaciones/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getDB();
+
+    const doc = await db.collection('notificaciones').findOne(filtroIdMongo(id));
+    const condiciones = [filtroIdMongo(id)];
+    if (doc && doc.recordatorio_key) {
+      condiciones.push({ recordatorio_key: doc.recordatorio_key });
+    }
+
+    await db.collection('notificaciones').updateMany(
+      { $or: condiciones },
+      { $set: { eliminada: true, leida: true, fecha_eliminacion: new Date().toISOString() } }
+    );
+
+    return res.json({ mensaje: 'Notificación eliminada definitivamente.' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al eliminar notificación', error: error.message });
+  }
+});
+
 // ==========================================
 // 8. CONTACTOS DE EMERGENCIA (CRUD)
 // ==========================================
@@ -1407,7 +1519,6 @@ app.post('/api/chat/enviar', async (req, res) => {
     return res.status(500).json({ mensaje: 'Error al enviar mensaje', error: error.message });
   }
 });
-
 
 // ==========================================
 // 11. ARCHIVOS MÉDICOS (CRUD)
