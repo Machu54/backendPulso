@@ -1073,10 +1073,17 @@ app.get('/api/notificaciones', async (req, res) => {
       .limit(50)
       .toArray();
 
-    const notificaciones = docs.map((item) => {
-      const id = String(item.id || item._id || '');
-      return { ...item, id, _id: id };
-    });
+    const vistas = new Set();
+    const notificaciones = [];
+
+    for (const item of docs) {
+      const clave = item.recordatorio_key || `${item.titulo}_${item.mensaje}`;
+      if (!vistas.has(clave)) {
+        vistas.add(clave);
+        const id = String(item.id || item._id || '');
+        notificaciones.push({ ...item, id, _id: id });
+      }
+    }
 
     return res.json(notificaciones);
   } catch (_) {
