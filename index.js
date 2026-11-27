@@ -942,28 +942,159 @@ app.delete('/api/eventos/:id', async (req, res) => {
   }
 });
 
-/// ==========================================
-// 7. NOTIFICACIONES REALES (SIN MOCKS Y CON RECORDATORIOS DE CITAS)
 // ==========================================
+// 7. NOTIFICACIONES (SINCRONIZADAS CON MONGODB ATLAS)
+// ==========================================
+
+async function sincronizarTodasLasNotificaciones(db) {
+  try {
+    const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const hoyStr = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, '0')}-${String(ahora.getDate()).padStart(2, '0')}`;
+
+    const manana = new Date(ahora);
+    manana.setDate(ahora.getDate() + 1);
+    const mananaStr = `${manana.getFullYear()}-${String(manana.getMonth() + 1).padStart(2, '0')}-${String(manana.getDate()).padStart(2, '0')}`;
+
+    const diasSemana = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+    const diaHoy = diasSemana[ahora.getDay()];
+    const minutosAhora = ahora.getHours() * 60 + ahora.getMinutes();
+
+    // A. MEDICAMENTOS
+    const medicamentos = await db.collection('medicamentos').find({}).toArray();
+    for (const med of medicamentos) {
+      const diasNorm = (med.dias || []).map((d) => String(d).toLowerCase());
+      const aplicaHoy =
+        diasNorm.length === 0 ||
+        diasNorm.includes(diaHoy) ||
+        diasNorm.includes('diario') ||
+        diasNorm.includes('todos');
+
+      if (!aplicaHoy) continue;
+
+      let listaHoras = [];
+      if (Array.isArray(med.horas) && med.horas.length) listaHoras = med.horas;
+      else if (Array.isArray(med.horarios) && med.horarios.length) listaHoras = med.horarios;
+      else if (typeof med.horas === 'string' && med.horas.trim()) listaHoras = med.horas.split(',');
+      else if (typeof med.horarios === 'string' && med.horarios.trim()) listaHoras = med.horarios.split(',');
+      else if (med.hora) listaHoras = [String(med.hora)];
+
+      const medId = String(med.id || med._id || med.nombre || '');
+
+      for (const rawHora of listaHoras) {
+        const match = String(rawHora).match(/(\d{1,2}):(\d{2})/);
+        if (!match) continue;
+
+        const h = Number(match[1]);
+        const m = Number(match[2]);
+        const horaStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        const dif = h * 60 + m - minutosAhora;
+
+        if (dif <= 15 && dif >= -30) {
+          const keyUnica = `med_${medId}_${hoyStr}_${horaStr}`;
+          const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
+          if (!yaExiste) {
+            await db.collection('notificaciones').insertOne({
+              id: crypto.randomBytes(8).toString('hex'),
+              recordatorio_key: keyUnica,
+              modulo: 'medicamentos',
+              user_email: med.usuario_id || med.user_email || '',
+              titulo:
+                dif <= 0
+                  ? `💊 ¡Hora de tomar ${med.nombre}!`
+                  : `🔔 Próxima toma en ${dif} min: ${med.nombre}`,
+              mensaje: `Dosis: ${med.dosis || 'según indicación'} — Horario: ${horaStr} hrs.`,
+              tipo: dif <= 0 ? 'alerta' : 'recordatorio',
+              leida: false,
+              fecha: new Date().toISOString()
+            });
+          }
+        }
+      }
+    }
+
+    // B. CITAS MÉDICAS
+    const eventos = await db.collection('eventos').find({}).toArray();
+    for (const ev of eventos) {
+      const fechaCita = ev.fecha_cita || (ev.fecha ? String(ev.fecha).slice(0, 10) : '');
+      if (!fechaCita) continue;
+
+      const evId = String(ev.id || ev._id || '');
+      let modo = null;
+      if (fechaCita === hoyStr) modo = 'mismo_dia';
+      else if (fechaCita === mananaStr) modo = 'dia_antes';
+
+      if (modo) {
+        const keyUnica = `cita_${evId}_${modo}_${hoyStr}`;
+        const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
+        if (!yaExiste) {
+          await db.collection('notificaciones').insertOne({
+            id: crypto.randomBytes(8).toString('hex'),
+            recordatorio_key: keyUnica,
+            modulo: 'citas',
+            user_email: ev.usuario_id || '',
+            titulo:
+              modo === 'mismo_dia'
+                ? `📅 ¡Hoy tienes cita!: ${ev.titulo}`
+                : `🔔 Cita mañana: ${ev.titulo}`,
+            mensaje: `${modo === 'mismo_dia' ? 'Cita programada hoy' : `Cita programada para mañana (${fechaCita})`}${
+              ev.hora_cita ? ` a las ${ev.hora_cita} hrs` : ''
+            }${ev.ubicacion ? ` en ${ev.ubicacion}` : ''}.`,
+            ubicacion: ev.ubicacion || '',
+            tipo: modo === 'mismo_dia' ? 'alerta' : 'recordatorio',
+            leida: false,
+            fecha: new Date().toISOString()
+          });
+        }
+      }
+    }
+
+    // C. MEDICIONES ANORMALES
+    const ultimasMediciones = await db.collection('mediciones').find({}).sort({ _id: -1 }).limit(15).toArray();
+    for (const medicion of ultimasMediciones) {
+      const medicionId = String(medicion._id || medicion.id || '');
+      if (!medicionId) continue;
+
+      const fc = Number(medicion.frecuencia_cardiaca || medicion.ritmo_cardiaco || medicion.bpm || 0);
+      const spo2 = Number(medicion.oxigenacion || medicion.spo2 || 0);
+      const sis = Number(medicion.presion_sistolica || 0);
+      const dia = Number(medicion.presion_diastolica || 0);
+
+      const alertasSignos = [];
+      if (fc > 0 && (fc > 110 || fc < 50)) alertasSignos.push(`Ritmo cardíaco: ${fc} lpm`);
+      if (spo2 > 0 && spo2 < 92) alertasSignos.push(`Oxigenación baja: ${spo2}%`);
+      if (sis >= 140 || dia >= 90) alertasSignos.push(`Presión elevada: ${sis}/${dia} mmHg`);
+
+      if (alertasSignos.length > 0) {
+        const keyUnica = `signos_${medicionId}`;
+        const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
+        if (!yaExiste) {
+          await db.collection('notificaciones').insertOne({
+            id: crypto.randomBytes(8).toString('hex'),
+            recordatorio_key: keyUnica,
+            modulo: 'mediciones',
+            user_email: medicion.usuario_id || medicion.user_email || '',
+            titulo: '🚨 Alerta en Signos Vitales',
+            mensaje: `Se detectó una medición fuera de rango: ${alertasSignos.join(' | ')}.`,
+            tipo: 'alerta',
+            leida: false,
+            fecha: medicion.fecha || medicion.created_at || new Date().toISOString()
+          });
+        }
+      }
+    }
+  } catch (_) {}
+}
 
 app.get('/api/notificaciones', async (req, res) => {
   try {
-    const email = req.headers['x-user-email'] ? resolverEmail(req) : null;
     const db = getDB();
-
-    // Sincroniza automáticamente recordatorios de citas (1 día antes y mismo día)
-    if (typeof sincronizarRecordatoriosCitas === 'function') {
-      await sincronizarRecordatoriosCitas(db, email);
-    }
-
-    const filtro = email
-      ? { $or: [{ user_email: email }, { user_email: '' }, { user_email: { $exists: false } }] }
-      : {};
+    await sincronizarTodasLasNotificaciones(db);
 
     const docs = await db
       .collection('notificaciones')
-      .find(filtro)
+      .find({})
       .sort({ fecha: -1, _id: -1 })
+      .limit(50)
       .toArray();
 
     const notificaciones = docs.map((item) => {
@@ -977,15 +1108,45 @@ app.get('/api/notificaciones', async (req, res) => {
   }
 });
 
+app.post('/api/notificaciones', async (req, res) => {
+  try {
+    const { titulo, mensaje, tipo, modulo, recordatorio_key, ubicacion } = req.body || {};
+    if (!titulo) {
+      return res.status(422).json({ mensaje: 'El título es obligatorio.' });
+    }
+
+    const db = getDB();
+    if (recordatorio_key) {
+      const existente = await db.collection('notificaciones').findOne({ recordatorio_key });
+      if (existente) {
+        const idExistente = String(existente.id || existente._id || '');
+        return res.json({ ...existente, id: idExistente, _id: idExistente });
+      }
+    }
+
+    const nueva = {
+      id: crypto.randomBytes(8).toString('hex'),
+      recordatorio_key: recordatorio_key || '',
+      modulo: modulo || 'general',
+      titulo: String(titulo),
+      mensaje: mensaje ? String(mensaje) : '',
+      ubicacion: ubicacion ? String(ubicacion) : '',
+      tipo: tipo || 'recordatorio',
+      leida: false,
+      fecha: new Date().toISOString()
+    };
+
+    await db.collection('notificaciones').insertOne({ ...nueva });
+    return res.status(201).json(nueva);
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al guardar notificación', error: error.message });
+  }
+});
+
 app.put('/api/notificaciones/leer-todas', async (req, res) => {
   try {
-    const email = req.headers['x-user-email'] ? resolverEmail(req) : null;
     const db = getDB();
-    const filtro = email
-      ? { $or: [{ user_email: email }, { user_email: '' }, { user_email: { $exists: false } }] }
-      : {};
-
-    await db.collection('notificaciones').updateMany(filtro, { $set: { leida: true } });
+    await db.collection('notificaciones').updateMany({}, { $set: { leida: true } });
     return res.json({ mensaje: 'Notificaciones marcadas como leídas.' });
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al actualizar notificaciones', error: error.message });
