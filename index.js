@@ -959,7 +959,7 @@ async function sincronizarTodasLasNotificaciones(db) {
     const diaHoy = diasSemana[ahora.getDay()];
     const minutosAhora = ahora.getHours() * 60 + ahora.getMinutes();
 
-    // A. MEDICAMENTOS
+    // A. MEDICAMENTOS: UNA SOLA VEZ A SU HORA EXACTA
     const medicamentos = await db.collection('medicamentos').find({}).toArray();
     for (const med of medicamentos) {
       const diasNorm = (med.dias || []).map((d) => String(d).toLowerCase());
@@ -987,9 +987,9 @@ async function sincronizarTodasLasNotificaciones(db) {
         const h = Number(match[1]);
         const m = Number(match[2]);
         const horaStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-        const dif = h * 60 + m - minutosAhora;
+        const dif = minutosAhora - (h * 60 + m);
 
-        if (dif <= 15 && dif >= -30) {
+        if (dif === 0 || dif === 1) {
           const keyUnica = `med_${medId}_${hoyStr}_${horaStr}`;
           const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
           if (!yaExiste) {
@@ -998,12 +998,9 @@ async function sincronizarTodasLasNotificaciones(db) {
               recordatorio_key: keyUnica,
               modulo: 'medicamentos',
               user_email: med.usuario_id || med.user_email || '',
-              titulo:
-                dif <= 0
-                  ? `💊 ¡Hora de tomar ${med.nombre}!`
-                  : `🔔 Próxima toma en ${dif} min: ${med.nombre}`,
+              titulo: `💊 ¡Es hora de tomar ${med.nombre}!`,
               mensaje: `Dosis: ${med.dosis || 'según indicación'} — Horario: ${horaStr} hrs.`,
-              tipo: dif <= 0 ? 'alerta' : 'recordatorio',
+              tipo: 'alerta',
               leida: false,
               fecha: new Date().toISOString()
             });
@@ -1012,19 +1009,19 @@ async function sincronizarTodasLasNotificaciones(db) {
       }
     }
 
-    // B. CITAS MÉDICAS
+    // B. CITAS MÉDICAS: 24 HORAS ANTES Y A LA HORA EXACTA DEL DÍA DE LA CITA
     const eventos = await db.collection('eventos').find({}).toArray();
     for (const ev of eventos) {
       const fechaCita = ev.fecha_cita || (ev.fecha ? String(ev.fecha).slice(0, 10) : '');
       if (!fechaCita) continue;
 
       const evId = String(ev.id || ev._id || '');
-      let modo = null;
-      if (fechaCita === hoyStr) modo = 'mismo_dia';
-      else if (fechaCita === mananaStr) modo = 'dia_antes';
+      const horaRef = ev.hora_cita && /^\d{1,2}:\d{2}/.test(ev.hora_cita) ? ev.hora_cita : '09:00';
+      const [ch, cm] = horaRef.split(':').map(Number);
+      const difMinutos = minutosAhora - (ch * 60 + cm);
 
-      if (modo) {
-        const keyUnica = `cita_${evId}_${modo}_${hoyStr}`;
+      if (fechaCita === mananaStr && (difMinutos === 0 || difMinutos === 1)) {
+        const keyUnica = `cita_24h_${evId}_${fechaCita}`;
         const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
         if (!yaExiste) {
           await db.collection('notificaciones').insertOne({
@@ -1032,52 +1029,31 @@ async function sincronizarTodasLasNotificaciones(db) {
             recordatorio_key: keyUnica,
             modulo: 'citas',
             user_email: ev.usuario_id || '',
-            titulo:
-              modo === 'mismo_dia'
-                ? `📅 ¡Hoy tienes cita!: ${ev.titulo}`
-                : `🔔 Cita mañana: ${ev.titulo}`,
-            mensaje: `${modo === 'mismo_dia' ? 'Cita programada hoy' : `Cita programada para mañana (${fechaCita})`}${
-              ev.hora_cita ? ` a las ${ev.hora_cita} hrs` : ''
-            }${ev.ubicacion ? ` en ${ev.ubicacion}` : ''}.`,
+            titulo: `🔔 Aviso de Cita (en 24 hrs): ${ev.titulo}`,
+            mensaje: `Mañana${ev.hora_cita ? ` a las ${ev.hora_cita} hrs` : ''}${ev.ubicacion ? ` en ${ev.ubicacion}` : ''}.`,
             ubicacion: ev.ubicacion || '',
-            tipo: modo === 'mismo_dia' ? 'alerta' : 'recordatorio',
+            tipo: 'recordatorio',
             leida: false,
             fecha: new Date().toISOString()
           });
         }
       }
-    }
 
-    // C. MEDICIONES ANORMALES
-    const ultimasMediciones = await db.collection('mediciones').find({}).sort({ _id: -1 }).limit(15).toArray();
-    for (const medicion of ultimasMediciones) {
-      const medicionId = String(medicion._id || medicion.id || '');
-      if (!medicionId) continue;
-
-      const fc = Number(medicion.frecuencia_cardiaca || medicion.ritmo_cardiaco || medicion.bpm || 0);
-      const spo2 = Number(medicion.oxigenacion || medicion.spo2 || 0);
-      const sis = Number(medicion.presion_sistolica || 0);
-      const dia = Number(medicion.presion_diastolica || 0);
-
-      const alertasSignos = [];
-      if (fc > 0 && (fc > 110 || fc < 50)) alertasSignos.push(`Ritmo cardíaco: ${fc} lpm`);
-      if (spo2 > 0 && spo2 < 92) alertasSignos.push(`Oxigenación baja: ${spo2}%`);
-      if (sis >= 140 || dia >= 90) alertasSignos.push(`Presión elevada: ${sis}/${dia} mmHg`);
-
-      if (alertasSignos.length > 0) {
-        const keyUnica = `signos_${medicionId}`;
+      if (fechaCita === hoyStr && (difMinutos === 0 || difMinutos === 1)) {
+        const keyUnica = `cita_hoy_${evId}_${fechaCita}`;
         const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
         if (!yaExiste) {
           await db.collection('notificaciones').insertOne({
             id: crypto.randomBytes(8).toString('hex'),
             recordatorio_key: keyUnica,
-            modulo: 'mediciones',
-            user_email: medicion.usuario_id || medicion.user_email || '',
-            titulo: '🚨 Alerta en Signos Vitales',
-            mensaje: `Se detectó una medición fuera de rango: ${alertasSignos.join(' | ')}.`,
+            modulo: 'citas',
+            user_email: ev.usuario_id || '',
+            titulo: `📅 ¡Es hora de tu cita!: ${ev.titulo}`,
+            mensaje: `Cita programada hoy${ev.hora_cita ? ` a las ${ev.hora_cita} hrs` : ''}${ev.ubicacion ? ` en ${ev.ubicacion}` : ''}.`,
+            ubicacion: ev.ubicacion || '',
             tipo: 'alerta',
             leida: false,
-            fecha: medicion.fecha || medicion.created_at || new Date().toISOString()
+            fecha: new Date().toISOString()
           });
         }
       }
