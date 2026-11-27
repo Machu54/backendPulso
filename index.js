@@ -802,26 +802,54 @@ app.get('/api/eventos', async (req, res) => {
 
 app.post('/api/eventos', async (req, res) => {
   try {
-    const { titulo, descripcion, tipo } = req.body || {};
-    if (!titulo || !descripcion || !tipo) {
-      return res.status(422).json({ mensaje: 'titulo, descripcion y tipo son obligatorios.' });
+    const {
+      titulo,
+      descripcion,
+      tipo,
+      fecha_cita,
+      hora_cita,
+      ubicacion,
+      maps_url
+    } = req.body || {};
+
+    if (!titulo || !tipo || !fecha_cita) {
+      return res.status(422).json({
+        mensaje: 'Título, tipo y fecha de la cita son obligatorios.'
+      });
     }
 
     const email = resolverEmail(req);
+    const fechaIsoCompleta = hora_cita ? `${fecha_cita}T${hora_cita}:00` : `${fecha_cita}T09:00:00`;
+    const ubiLimpia = ubicacion ? String(ubicacion).trim() : '';
+    const linkLimpio = maps_url ? String(maps_url).trim() : '';
+    const urlMapsFinal =
+      linkLimpio && linkLimpio.startsWith('http')
+        ? linkLimpio
+        : ubiLimpia
+          ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ubiLimpia)}`
+          : '';
+
     const nuevoEvento = {
+      id: crypto.randomBytes(8).toString('hex'),
       usuario_id: String(email),
-      titulo: String(titulo),
-      descripcion: String(descripcion),
+      titulo: String(titulo).trim(),
+      descripcion: descripcion ? String(descripcion).trim() : '',
       tipo: String(tipo),
+      fecha_cita: String(fecha_cita),
+      hora_cita: hora_cita ? String(hora_cita) : '',
+      ubicacion: ubiLimpia,
+      maps_url: urlMapsFinal,
       estado: 'pendiente',
-      fecha: new Date().toISOString()
+      fecha: fechaIsoCompleta,
+      created_at: new Date().toISOString()
     };
 
     const db = getDB();
     await db.collection('eventos').insertOne({ ...nuevoEvento });
+    await sincronizarRecordatoriosCitas(db, email);
 
-    return res.json({
-      mensaje: 'Evento guardado exitosamente en MongoDB Atlas',
+    return res.status(201).json({
+      mensaje: 'Cita médica guardada exitosamente.',
       evento: nuevoEvento
     });
   } catch (error) {
