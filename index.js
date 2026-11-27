@@ -790,10 +790,79 @@ app.delete('/api/mediciones/:id', async (req, res) => {
 // 6. EVENTOS Y CITAS
 // ==========================================
 
+async function sincronizarRecordatoriosCitas(db, emailFiltro = null) {
+  try {
+    const query = emailFiltro ? { usuario_id: emailFiltro } : {};
+    const eventos = await db.collection('eventos').find(query).toArray();
+
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    const manana = new Date(hoy);
+    manana.setDate(hoy.getDate() + 1);
+
+    const hoyStr = hoy.toISOString().slice(0, 10);
+    const mananaStr = manana.toISOString().slice(0, 10);
+
+    for (const ev of eventos) {
+      const fechaCita = ev.fecha_cita || (ev.fecha ? String(ev.fecha).slice(0, 10) : '');
+      if (!fechaCita) continue;
+
+      const evId = String(ev.id || ev._id || '');
+      let tipoAviso = null;
+      let tituloNotif = '';
+      let mensajeNotif = '';
+
+      if (fechaCita === hoyStr) {
+        tipoAviso = 'mismo_dia';
+        tituloNotif = `📅 ¡Hoy tienes cita médica!: ${ev.titulo}`;
+        mensajeNotif = `Cita programada hoy${ev.hora_cita ? ` a las ${ev.hora_cita}` : ''}${
+          ev.ubicacion ? ` en ${ev.ubicacion}` : ''
+        }.`;
+      } else if (fechaCita === mananaStr) {
+        tipoAviso = 'dia_antes';
+        tituloNotif = `🔔 Recordatorio (Mañana): ${ev.titulo}`;
+        mensajeNotif = `Tu cita médica es mañana (${fechaCita})${ev.hora_cita ? ` a las ${ev.hora_cita}` : ''}${
+          ev.ubicacion ? ` en ${ev.ubicacion}` : ''
+        }.`;
+      }
+
+      if (tipoAviso) {
+        const keyUnica = `${evId}_${tipoAviso}_${hoyStr}`;
+        const yaNotificado = await db.collection('notificaciones').findOne({
+          recordatorio_key: keyUnica
+        });
+
+        if (!yaNotificado) {
+          await db.collection('notificaciones').insertOne({
+            id: crypto.randomBytes(8).toString('hex'),
+            recordatorio_key: keyUnica,
+            user_email: ev.usuario_id || emailFiltro || '',
+            titulo: tituloNotif,
+            mensaje: mensajeNotif,
+            ubicacion: ev.ubicacion || '',
+            maps_url: ev.maps_url || '',
+            tipo: tipoAviso === 'mismo_dia' ? 'alerta' : 'recordatorio',
+            leida: false,
+            fecha: new Date().toISOString()
+          });
+        }
+      }
+    }
+  } catch (_) {}
+}
+
 app.get('/api/eventos', async (req, res) => {
   try {
+    const email = req.headers['x-user-email'] ? resolverEmail(req) : null;
     const db = getDB();
-    const eventos = await db.collection('eventos').find({}).toArray();
+    await sincronizarRecordatoriosCitas(db, email);
+
+    const filtro = email ? { usuario_id: email } : {};
+    const docs = await db.collection('eventos').find(filtro).sort({ fecha_cita: 1, hora_cita: 1 }).toArray();
+    const eventos = docs.map((item) => {
+      const id = String(item._id || item.id || '');
+      return { ...item, id, _id: id };
+    });
     return res.json(eventos);
   } catch (_) {
     return res.json([]);
@@ -854,6 +923,22 @@ app.post('/api/eventos', async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al guardar evento', error: error.message });
+  }
+});
+
+app.delete('/api/eventos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getDB();
+    const resultado = await db.collection('eventos').deleteOne(filtroIdMongo(id));
+
+    if (resultado.deletedCount === 0) {
+      return res.status(404).json({ mensaje: 'No se encontró la cita médica para eliminar.' });
+    }
+
+    return res.json({ mensaje: 'Cita médica eliminada exitosamente' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al eliminar el evento', error: error.message });
   }
 });
 
