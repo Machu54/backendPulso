@@ -942,58 +942,76 @@ app.delete('/api/eventos/:id', async (req, res) => {
   }
 });
 
-// ==========================================
-// 7. NOTIFICACIONES (CRUD)
+/// ==========================================
+// 7. NOTIFICACIONES REALES (SIN MOCKS Y CON RECORDATORIOS DE CITAS)
 // ==========================================
 
 app.get('/api/notificaciones', async (req, res) => {
-  let notificaciones = [];
-
   try {
+    const email = req.headers['x-user-email'] ? resolverEmail(req) : null;
     const db = getDB();
-    notificaciones = await db.collection('notificaciones').find({}).toArray();
 
-    if (!notificaciones || notificaciones.length === 0) {
-      notificaciones = [
-        {
-          id: '1',
-          _id: '1',
-          titulo: 'Recordatorio de medicamento',
-          mensaje: 'Es hora de tomar tu Metformina 500mg con un vaso de agua.',
-          tipo: 'recordatorio',
-          leida: false,
-          fecha: new Date().toISOString()
-        },
-        {
-          id: '2',
-          _id: '2',
-          titulo: 'Medición de presión estable',
-          mensaje: 'Tu última lectura de presión arterial estuvo dentro del rango normal.',
-          tipo: 'alerta',
-          leida: true,
-          fecha: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
-        }
-      ];
+    // Sincroniza automáticamente recordatorios de citas (1 día antes y mismo día)
+    if (typeof sincronizarRecordatoriosCitas === 'function') {
+      await sincronizarRecordatoriosCitas(db, email);
     }
-  } catch (_) {
-    notificaciones = [];
-  }
 
-  return res.json(notificaciones);
+    const filtro = email
+      ? { $or: [{ user_email: email }, { user_email: '' }, { user_email: { $exists: false } }] }
+      : {};
+
+    const docs = await db
+      .collection('notificaciones')
+      .find(filtro)
+      .sort({ fecha: -1, _id: -1 })
+      .toArray();
+
+    const notificaciones = docs.map((item) => {
+      const id = String(item.id || item._id || '');
+      return { ...item, id, _id: id };
+    });
+
+    return res.json(notificaciones);
+  } catch (_) {
+    return res.json([]);
+  }
+});
+
+app.put('/api/notificaciones/leer-todas', async (req, res) => {
+  try {
+    const email = req.headers['x-user-email'] ? resolverEmail(req) : null;
+    const db = getDB();
+    const filtro = email
+      ? { $or: [{ user_email: email }, { user_email: '' }, { user_email: { $exists: false } }] }
+      : {};
+
+    await db.collection('notificaciones').updateMany(filtro, { $set: { leida: true } });
+    return res.json({ mensaje: 'Notificaciones marcadas como leídas.' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al actualizar notificaciones', error: error.message });
+  }
+});
+
+app.put('/api/notificaciones/:id/leer', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getDB();
+    await db.collection('notificaciones').updateMany(filtroIdMongo(id), { $set: { leida: true } });
+    return res.json({ mensaje: 'Notificación marcada como leída.' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al marcar notificación', error: error.message });
+  }
 });
 
 app.delete('/api/notificaciones/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const db = getDB();
-    const condiciones = [{ id }, { _id: id }];
-    if (ObjectId.isValid(id) && id.length === 24) {
-      condiciones.push({ _id: new ObjectId(id) });
-    }
-    await db.collection('notificaciones').deleteMany({ $or: condiciones });
-  } catch (_) {}
-
-  return res.json({ mensaje: 'Notificación eliminada exitosamente' });
+    await db.collection('notificaciones').deleteMany(filtroIdMongo(id));
+    return res.json({ mensaje: 'Notificación eliminada exitosamente.' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al eliminar notificación', error: error.message });
+  }
 });
 
 // ==========================================
