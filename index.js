@@ -1226,6 +1226,86 @@ app.post('/api/chat/enviar', async (req, res) => {
   }
 });
 
+
+// ==========================================
+// 11. ARCHIVOS MÉDICOS (CRUD)
+// ==========================================
+
+app.get('/api/archivos', async (req, res) => {
+  try {
+    const email = resolverEmail(req);
+    const db = getDB();
+    const docs = await db
+      .collection('archivos_medicos')
+      .find({ user_email: email })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    const archivos = docs.map((item) => {
+      const id = String(item._id || item.id || '');
+      return { ...item, id, _id: id };
+    });
+
+    return res.json(archivos);
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al obtener archivos médicos', error: error.message });
+  }
+});
+
+app.post('/api/archivos', async (req, res) => {
+  try {
+    const email = resolverEmail(req);
+    const { nombre, usuario, tipo, mime_type, tamano, contenido_base64 } = req.body || {};
+
+    if (!nombre || !usuario || !contenido_base64) {
+      return res.status(422).json({
+        mensaje: 'El nombre del archivo, el paciente y el contenido son obligatorios.'
+      });
+    }
+
+    const nuevoArchivo = {
+      id: crypto.randomBytes(8).toString('hex'),
+      user_email: email,
+      nombre: String(nombre).trim(),
+      usuario: String(usuario).trim(),
+      tipo: String(tipo || 'PDF').toUpperCase(),
+      mime_type: mime_type || 'application/pdf',
+      tamano: tamano || '0 KB',
+      fecha: new Date().toISOString().slice(0, 10),
+      contenido_base64,
+      created_at: new Date().toISOString()
+    };
+
+    const db = getDB();
+    await db.collection('archivos_medicos').insertOne({ ...nuevoArchivo });
+
+    return res.status(201).json({
+      mensaje: 'Archivo médico guardado exitosamente',
+      archivo: nuevoArchivo
+    });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al guardar archivo médico', error: error.message });
+  }
+});
+
+app.delete('/api/archivos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const email = resolverEmail(req);
+    const db = getDB();
+
+    const filtro = {
+      ...filtroIdMongo(id),
+      user_email: email
+    };
+
+    await db.collection('archivos_medicos').deleteOne(filtro);
+    return res.json({ mensaje: 'Archivo médico eliminado exitosamente' });
+  } catch (error) {
+    return res.status(500).json({ mensaje: 'Error al eliminar archivo médico', error: error.message });
+  }
+});
+
 // ==========================================
 // RUTA BASE E INICIO DEL SERVIDOR
 // ==========================================
