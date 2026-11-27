@@ -943,123 +943,8 @@ app.delete('/api/eventos/:id', async (req, res) => {
 });
 
 // ==========================================
-// 7. NOTIFICACIONES (SINCRONIZADAS CON MONGODB ATLAS)
+// 7. NOTIFICACIONES (SINCRONIZADAS CON BORRADO LÓGICO)
 // ==========================================
-
-async function sincronizarTodasLasNotificaciones(db) {
-  try {
-    const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-    const hoyStr = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, '0')}-${String(ahora.getDate()).padStart(2, '0')}`;
-
-    const manana = new Date(ahora);
-    manana.setDate(ahora.getDate() + 1);
-    const mananaStr = `${manana.getFullYear()}-${String(manana.getMonth() + 1).padStart(2, '0')}-${String(manana.getDate()).padStart(2, '0')}`;
-
-    const diasSemana = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
-    const diaHoy = diasSemana[ahora.getDay()];
-    const minutosAhora = ahora.getHours() * 60 + ahora.getMinutes();
-
-    // A. MEDICAMENTOS: UNA SOLA VEZ A SU HORA EXACTA
-    const medicamentos = await db.collection('medicamentos').find({}).toArray();
-    for (const med of medicamentos) {
-      const diasNorm = (med.dias || []).map((d) => String(d).toLowerCase());
-      const aplicaHoy =
-        diasNorm.length === 0 ||
-        diasNorm.includes(diaHoy) ||
-        diasNorm.includes('diario') ||
-        diasNorm.includes('todos');
-
-      if (!aplicaHoy) continue;
-
-      let listaHoras = [];
-      if (Array.isArray(med.horas) && med.horas.length) listaHoras = med.horas;
-      else if (Array.isArray(med.horarios) && med.horarios.length) listaHoras = med.horarios;
-      else if (typeof med.horas === 'string' && med.horas.trim()) listaHoras = med.horas.split(',');
-      else if (typeof med.horarios === 'string' && med.horarios.trim()) listaHoras = med.horarios.split(',');
-      else if (med.hora) listaHoras = [String(med.hora)];
-
-      const medId = String(med.id || med._id || med.nombre || '');
-
-      for (const rawHora of listaHoras) {
-        const match = String(rawHora).match(/(\d{1,2}):(\d{2})/);
-        if (!match) continue;
-
-        const h = Number(match[1]);
-        const m = Number(match[2]);
-        const horaStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-        const dif = minutosAhora - (h * 60 + m);
-
-        if (dif === 0 || dif === 1) {
-          const keyUnica = `med_${medId}_${hoyStr}_${horaStr}`;
-          const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
-          if (!yaExiste) {
-            await db.collection('notificaciones').insertOne({
-              id: crypto.randomBytes(8).toString('hex'),
-              recordatorio_key: keyUnica,
-              modulo: 'medicamentos',
-              user_email: med.usuario_id || med.user_email || '',
-              titulo: `💊 ¡Es hora de tomar ${med.nombre}!`,
-              mensaje: `Dosis: ${med.dosis || 'según indicación'} — Horario: ${horaStr} hrs.`,
-              tipo: 'alerta',
-              leida: false,
-              fecha: new Date().toISOString()
-            });
-          }
-        }
-      }
-    }
-
-    // B. CITAS MÉDICAS: 24 HORAS ANTES Y A LA HORA EXACTA DEL DÍA DE LA CITA
-    const eventos = await db.collection('eventos').find({}).toArray();
-    for (const ev of eventos) {
-      const fechaCita = ev.fecha_cita || (ev.fecha ? String(ev.fecha).slice(0, 10) : '');
-      if (!fechaCita) continue;
-
-      const evId = String(ev.id || ev._id || '');
-      const horaRef = ev.hora_cita && /^\d{1,2}:\d{2}/.test(ev.hora_cita) ? ev.hora_cita : '09:00';
-      const [ch, cm] = horaRef.split(':').map(Number);
-      const difMinutos = minutosAhora - (ch * 60 + cm);
-
-      if (fechaCita === mananaStr && (difMinutos === 0 || difMinutos === 1)) {
-        const keyUnica = `cita_24h_${evId}_${fechaCita}`;
-        const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
-        if (!yaExiste) {
-          await db.collection('notificaciones').insertOne({
-            id: crypto.randomBytes(8).toString('hex'),
-            recordatorio_key: keyUnica,
-            modulo: 'citas',
-            user_email: ev.usuario_id || '',
-            titulo: `🔔 Aviso de Cita (en 24 hrs): ${ev.titulo}`,
-            mensaje: `Mañana${ev.hora_cita ? ` a las ${ev.hora_cita} hrs` : ''}${ev.ubicacion ? ` en ${ev.ubicacion}` : ''}.`,
-            ubicacion: ev.ubicacion || '',
-            tipo: 'recordatorio',
-            leida: false,
-            fecha: new Date().toISOString()
-          });
-        }
-      }
-
-      if (fechaCita === hoyStr && (difMinutos === 0 || difMinutos === 1)) {
-        const keyUnica = `cita_hoy_${evId}_${fechaCita}`;
-        const yaExiste = await db.collection('notificaciones').findOne({ recordatorio_key: keyUnica });
-        if (!yaExiste) {
-          await db.collection('notificaciones').insertOne({
-            id: crypto.randomBytes(8).toString('hex'),
-            recordatorio_key: keyUnica,
-            modulo: 'citas',
-            user_email: ev.usuario_id || '',
-            titulo: `📅 ¡Es hora de tu cita!: ${ev.titulo}`,
-            mensaje: `Cita programada hoy${ev.hora_cita ? ` a las ${ev.hora_cita} hrs` : ''}${ev.ubicacion ? ` en ${ev.ubicacion}` : ''}.`,
-            ubicacion: ev.ubicacion || '',
-            tipo: 'alerta',
-            leida: false,
-            fecha: new Date().toISOString()
-          });
-        }
-      }
-    }
-  } catch (_) {}
-}
 
 app.get('/api/notificaciones', async (req, res) => {
   try {
@@ -1068,7 +953,7 @@ app.get('/api/notificaciones', async (req, res) => {
 
     const docs = await db
       .collection('notificaciones')
-      .find({})
+      .find({ eliminada: { $ne: true } })
       .sort({ fecha: -1, _id: -1 })
       .limit(50)
       .toArray();
@@ -1102,6 +987,7 @@ app.post('/api/notificaciones', async (req, res) => {
     if (recordatorio_key) {
       const existente = await db.collection('notificaciones').findOne({ recordatorio_key });
       if (existente) {
+        // Si ya existió o fue eliminada previamente, no la recrea
         const idExistente = String(existente.id || existente._id || '');
         return res.json({ ...existente, id: idExistente, _id: idExistente });
       }
@@ -1116,6 +1002,7 @@ app.post('/api/notificaciones', async (req, res) => {
       ubicacion: ubicacion ? String(ubicacion) : '',
       tipo: tipo || 'recordatorio',
       leida: false,
+      eliminada: false,
       fecha: new Date().toISOString()
     };
 
@@ -1129,7 +1016,10 @@ app.post('/api/notificaciones', async (req, res) => {
 app.put('/api/notificaciones/leer-todas', async (req, res) => {
   try {
     const db = getDB();
-    await db.collection('notificaciones').updateMany({}, { $set: { leida: true } });
+    await db.collection('notificaciones').updateMany(
+      { eliminada: { $ne: true } },
+      { $set: { leida: true } }
+    );
     return res.json({ mensaje: 'Notificaciones marcadas como leídas.' });
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al actualizar notificaciones', error: error.message });
@@ -1151,13 +1041,24 @@ app.delete('/api/notificaciones/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const db = getDB();
-    await db.collection('notificaciones').deleteMany(filtroIdMongo(id));
-    return res.json({ mensaje: 'Notificación eliminada exitosamente.' });
+
+    // Busca el documento para obtener también su recordatorio_key y bloquear duplicados
+    const doc = await db.collection('notificaciones').findOne(filtroIdMongo(id));
+    const condiciones = [filtroIdMongo(id)];
+    if (doc && doc.recordatorio_key) {
+      condiciones.push({ recordatorio_key: doc.recordatorio_key });
+    }
+
+    await db.collection('notificaciones').updateMany(
+      { $or: condiciones },
+      { $set: { eliminada: true, leida: true, fecha_eliminacion: new Date().toISOString() } }
+    );
+
+    return res.json({ mensaje: 'Notificación eliminada definitivamente.' });
   } catch (error) {
     return res.status(500).json({ mensaje: 'Error al eliminar notificación', error: error.message });
   }
 });
-
 // ==========================================
 // 8. CONTACTOS DE EMERGENCIA (CRUD)
 // ==========================================
